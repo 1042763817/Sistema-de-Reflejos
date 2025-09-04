@@ -2,60 +2,46 @@ from machine import Pin
 import time, random
 import micropython
 
-#CONFIGURACIÓN DE PINES
+# =========================
+# CONFIGURACIÓN DE PINES
+# =========================
+LED_PINS = (2, 4, 5)
+BUZZER_PIN = 18
 
-LED_PINS = (2, 4, 5)            # pines para los Leds
-BUZZER_PIN = 18                 # Pin buzzer
-
-# Botones jugador 1 (uno por cada salida: LED1, LED2, LED3, Buzzer)
 J1_BTN_PINS = (12, 13, 14, 27)
-
-# Botones jugador 2 (uno por cada salida: LED1, LED2, LED3, Buzzer)
 J2_BTN_PINS = (32, 33, 25, 26)
 
-BTN_INICIO_PIN = 19             # botón de inicio
-BTN_FIN_PIN = 21                # botón para finalizar partida
-IRQ_MODO3_PIN = 34              # boton de interrupcion , necesecita resistencia pull up fisica
+BTN_INICIO_PIN = 19
+BTN_FIN_PIN = 21
+IRQ_MODO3_PIN = 23   
 
+# =========================
 # REGISTROS GPIO (ESP32)
-
-GPIO_OUT_REG     = 0x3FF44004  # Registro de salida actual
-GPIO_OUT_W1TS_REG = 0x3FF44008 # Write-1-To-Set esto es para poner un high
-GPIO_OUT_W1TC_REG = 0x3FF4400C # Write-1-To-Clear esto es para poner un low
-
+# =========================
+GPIO_OUT_REG      = 0x3FF44004
+GPIO_OUT_W1TS_REG = 0x3FF44008
+GPIO_OUT_W1TC_REG = 0x3FF4400C
 
 LED_MASK = 0
 for p in LED_PINS:
     LED_MASK |= (1 << p)
 
-
-# aqui se configuran los leds como salidas
 leds = [Pin(p, Pin.OUT) for p in LED_PINS]
-
-# Buzzer como salida 
 buzzer = Pin(BUZZER_PIN, Pin.OUT)
 
-# Botones de jugadores son entradas con pull down
 botones_j1 = [Pin(p, Pin.IN, Pin.PULL_DOWN) for p in J1_BTN_PINS]
 botones_j2 = [Pin(p, Pin.IN, Pin.PULL_DOWN) for p in J2_BTN_PINS]
-
-# Botones de control tambien son entradas
 btn_inicio = Pin(BTN_INICIO_PIN, Pin.IN, Pin.PULL_DOWN)
 btn_fin = Pin(BTN_FIN_PIN, Pin.IN, Pin.PULL_DOWN)
-
-# Interrupción modo 3
-irq_pin = Pin(IRQ_MODO3_PIN, Pin.IN)
-
-
-# VARIABLES para los estados
-
+irq_pin = Pin(IRQ_MODO3_PIN, Pin.IN, Pin.PULL_UP) 
 puntaje_j1 = 0
 puntaje_j2 = 0
-modo3_disparado = False    # flag global que enciende el modo 3 por IRQ
+modo3_disparado = False
+modo_actual = None
 
-
-# UTILIDADES DE LED POR REGISTROS
-
+# =========================
+# FUNCIONES DE LEDS
+# =========================
 def leds_off_mask(mask=LED_MASK):
     import machine
     machine.mem32[GPIO_OUT_W1TC_REG] = mask
@@ -72,7 +58,6 @@ def leds_all_off():
     leds_off_mask(LED_MASK)
 
 def leds_show_index(i):
-    """Enciende solo el LED i en una sola escritura de registro"""
     import machine
     mask = led_index_mask(i)
     val = machine.mem32[GPIO_OUT_REG]
@@ -82,9 +67,9 @@ def apagar_salidas():
     leds_all_off()
     buzzer.off()
 
-
-# Antirebote para los pulsadores , software
-
+# =========================
+# FUNCIONES AUXILIARES
+# =========================
 def antirrebote(btn, hold_ms=20):
     if btn.value() == 1:
         time.sleep_ms(hold_ms)
@@ -102,9 +87,9 @@ def sleep_con_interrupcion(segundos):
         time.sleep_ms(10)
     return 'ok'
 
-
-# ENTRADAS DE JUEGO
-
+# =========================
+# ESPERAS DE RESPUESTA
+# =========================
 def esperar_respuesta_1jugador(correcto):
     inicio = time.ticks_ms()
     while True:
@@ -119,29 +104,51 @@ def esperar_respuesta_1jugador(correcto):
                 tiempo = time.ticks_diff(fin, inicio)
                 return (tiempo, 0) if i == correcto else (tiempo, -1)
 
-def esperar_respuesta_2jugadores(correcto):
+def esperar_respuesta_2jugadores(correcto, ventana_ms=1500, limite_total_ms=10000):
     inicio = time.ticks_ms()
+    tiempos = {'J1': None, 'J2': None}
+    penal = {'J1': None, 'J2': None}
+    t_primera = None
+
     while True:
         if antirrebote(btn_fin):
-            return None, None, None
+            return None, None
         if modo3_disparado:
-            return 'irq', None, None
+            return None, 'irq'   # <<< corregido
 
         for i, btn in enumerate(botones_j1):
-            if antirrebote(btn):
+            if tiempos['J1'] is None and antirrebote(btn):
                 fin = time.ticks_ms()
-                tiempo = time.ticks_diff(fin, inicio)
-                return (1, tiempo, 0) if i == correcto else (1, tiempo, -1)
+                tiempos['J1'] = time.ticks_diff(fin, inicio)
+                penal['J1'] = 0 if i == correcto else -1
+                if t_primera is None:
+                    t_primera = fin
 
         for i, btn in enumerate(botones_j2):
-            if antirrebote(btn):
+            if tiempos['J2'] is None and antirrebote(btn):
                 fin = time.ticks_ms()
-                tiempo = time.ticks_diff(fin, inicio)
-                return (2, tiempo, 0) if i == correcto else (2, tiempo, -1)
+                tiempos['J2'] = time.ticks_diff(fin, inicio)
+                penal['J2'] = 0 if i == correcto else -1
+                if t_primera is None:
+                    t_primera = fin
 
+        if tiempos['J1'] is not None and tiempos['J2'] is not None:
+            break
 
-# JUEGOS
+        if t_primera is not None:
+            if time.ticks_diff(time.ticks_ms(), t_primera) >= ventana_ms:
+                break
 
+        if time.ticks_diff(time.ticks_ms(), inicio) >= limite_total_ms:
+            break
+
+        time.sleep_ms(5)
+
+    return tiempos, penal
+
+# =========================
+# RONDAS
+# =========================
 def ronda_generar_estimulo():
     estimulo = random.randint(0, 3)
     if estimulo == 3:
@@ -150,11 +157,16 @@ def ronda_generar_estimulo():
         leds_show_index(estimulo)
     return estimulo
 
+# =========================
+# JUEGOS
+# =========================
 def juego_1jugador():
-    global puntaje_j1, modo3_disparado
+    global puntaje_j1, modo3_disparado, modo_actual
+    modo_actual = "1jugador"
+    modo3_disparado = False
     puntaje_j1 = 0
     ronda = 0
-    print("Modo: 1 Jugador")
+    print("\nModo: 1 Jugador")
     print("Presiona INICIO para comenzar...")
     while not antirrebote(btn_inicio):
         if modo3_disparado:
@@ -169,7 +181,7 @@ def juego_1jugador():
         espera = random.randint(1, 10)
         s = sleep_con_interrupcion(espera)
         if s == 'fin':
-            print("Juego finalizado")
+            print("\nJuego finalizado")
             break
         if s == 'irq':
             juego_modo3()
@@ -183,7 +195,7 @@ def juego_1jugador():
         apagar_salidas()
 
         if tiempo is None and penalizacion is None:
-            print("Juego finalizado")
+            print("\nJuego finalizado")
             break
         if tiempo == 'irq':
             juego_modo3()
@@ -198,14 +210,16 @@ def juego_1jugador():
 
         time.sleep(1)
 
-    print(f"Puntaje final J1: {puntaje_j1}")
+    print(f"\nPuntaje final J1: {puntaje_j1}")
 
 def juego_2jugadores():
-    global puntaje_j1, puntaje_j2
+    global puntaje_j1, puntaje_j2, modo_actual, modo3_disparado
+    modo_actual = "2jugadores"
+    modo3_disparado = False
     puntaje_j1 = 0
     puntaje_j2 = 0
     ronda = 0
-    print("Modo: 2 Jugadores")
+    print("\nModo: 2 Jugadores")
     print("Presiona INICIO para comenzar...")
     while not antirrebote(btn_inicio):
         if modo3_disparado:
@@ -220,7 +234,7 @@ def juego_2jugadores():
         espera = random.randint(1, 10)
         s = sleep_con_interrupcion(espera)
         if s == 'fin':
-            print("Juego finalizado")
+            print("\nJuego finalizado")
             break
         if s == 'irq':
             juego_modo3()
@@ -230,34 +244,62 @@ def juego_2jugadores():
         print(f"\n--- Ronda {ronda} ---")
         print(f"Reacciona al estímulo {estimulo+1}")
 
-        jugador, tiempo, penal = esperar_respuesta_2jugadores(estimulo)
+        tiempos, penal = esperar_respuesta_2jugadores(estimulo)
         apagar_salidas()
 
-        if jugador is None and tiempo is None and penal is None:
-            print("Juego finalizado")
+        if tiempos is None and penal is None:
+            print("\nJuego finalizado")
             break
-        if jugador == 'irq':
+        if penal == 'irq':   # <<< corregido
             juego_modo3()
             continue
 
-        if penal == 0:
-            if jugador == 1:
+        t1 = f"{tiempos['J1']} ms" if tiempos['J1'] is not None else "—"
+        t2 = f"{tiempos['J2']} ms" if tiempos['J2'] is not None else "—"
+        e1 = "Correcto" if penal['J1'] == 0 else ("Incorrecto" if penal['J1'] == -1 else "Sin respuesta")
+        e2 = "Correcto" if penal['J2'] == 0 else ("Incorrecto" if penal['J2'] == -1 else "Sin respuesta")
+
+        print(f"J1: {t1} ({e1})")
+        print(f"J2: {t2} ({e2})")
+
+        if penal['J1'] == -1:
+            puntaje_j1 -= 1
+            print("J1 se equivoca: -1 punto.")
+        if penal['J2'] == -1:
+            puntaje_j2 -= 1
+            print("J2 se equivoca: -1 punto.")
+
+        candidatos = []
+        if penal['J1'] == 0 and tiempos['J1'] is not None:
+            candidatos.append(('J1', tiempos['J1']))
+        if penal['J2'] == 0 and tiempos['J2'] is not None:
+            candidatos.append(('J2', tiempos['J2']))
+
+        if len(candidatos) == 2:
+            if candidatos[0][1] < candidatos[1][1]:
                 puntaje_j1 += 1
-                print(f"Jugador1 correcto! Tiempo: {tiempo} ms | J1: {puntaje_j1} | J2: {puntaje_j2}")
+                print("Punto por mejor tiempo: Jugador 1.")
+            elif candidatos[1][1] < candidatos[0][1]:
+                puntaje_j2 += 1
+                print("Punto por mejor tiempo: Jugador 2.")
+            else:
+                puntaje_j1 += 1
+                puntaje_j2 += 1
+                print("Empate perfecto: ambos +1.")
+        elif len(candidatos) == 1:
+            if candidatos[0][0] == 'J1':
+                puntaje_j1 += 1
+                print("Punto para Jugador 1 (único correcto).")
             else:
                 puntaje_j2 += 1
-                print(f"Jugador2 correcto! Tiempo: {tiempo} ms | J1: {puntaje_j1} | J2: {puntaje_j2}")
+                print("Punto para Jugador 2 (único correcto).")
         else:
-            if jugador == 1:
-                puntaje_j1 -= 1
-                print(f"Jugador1 incorrecto! Tiempo: {tiempo} ms | J1: {puntaje_j1} | J2: {puntaje_j2}")
-            else:
-                puntaje_j2 -= 1
-                print(f"Jugador2 incorrecto! Tiempo: {tiempo} ms | J1: {puntaje_j1} | J2: {puntaje_j2}")
+            print("Nadie acierta.")
 
+        print(f"Marcador — Jugador 1: {puntaje_j1} | Jugador 2: {puntaje_j2}")
         time.sleep(1)
 
-    print(f"Puntaje final — Jugador 1: {puntaje_j1} | Jugador2: {puntaje_j2}")
+    print(f"\nPuntaje final — J1: {puntaje_j1} | J2: {puntaje_j2}")
     if puntaje_j1 > puntaje_j2:
         print("Ganador: Jugador 1")
     elif puntaje_j2 > puntaje_j1:
@@ -265,91 +307,142 @@ def juego_2jugadores():
     else:
         print("Empate!")
 
-
-# MODO 3 — INTERRUPCIÓN
-
+# =========================
+# INTERRUPCIÓN
+# =========================
+last_irq_ms = 0
 def _irq_handler(pin):
-    global modo3_disparado
-    modo3_disparado = True
+    global modo3_disparado, last_irq_ms
+    now = time.ticks_ms()
+    if time.ticks_diff(now, last_irq_ms) > 150:
+        modo3_disparado = True
+        last_irq_ms = now
 
-irq_pin.irq(trigger=Pin.IRQ_RISING, handler=_irq_handler)
+irq_pin.irq(trigger=Pin.IRQ_FALLING, handler=_irq_handler)
 
+# =========================
+# MODO 3
+# =========================
 def juego_modo3():
-    global modo3_disparado
-    print("MODO 3 (Muerte Súbita) ACTIVADO POR INTERRUPCIÓN")
+    global modo3_disparado, modo_actual
+    print("\nMODO 3 (Muerte Súbita) ACTIVADO")
     modo3_disparado = False
 
-    apagar_salidas()
-    espera = random.randint(1, 10)
-    s = sleep_con_interrupcion(espera)
-    if s == 'fin':
-        print("Cancelado por usuario.")
-        return
-
-    estimulo = ronda_generar_estimulo()
-    print("¡Reacciona! (Muerte Súbita)")
-
-    inicio = time.ticks_ms()
-    ganador = None
-    tiempo = None
-
+    ronda = 0
     while True:
-        if antirrebote(btn_fin):
+        ronda += 1
+        apagar_salidas()
+        espera = random.randint(1, 10)
+        s = sleep_con_interrupcion(espera)
+        if s == 'fin':
             print("Cancelado por usuario.")
-            apagar_salidas()
             return
 
-        for i, btn in enumerate(botones_j1):
-            if antirrebote(btn):
-                fin = time.ticks_ms()
-                tiempo = time.ticks_diff(fin, inicio)
-                ganador = 'J1' if i == estimulo else 'Nadie (J1 erró)'
+        estimulo = ronda_generar_estimulo()
+        print(f"\n--- Ronda {ronda} (Muerte Súbita) --- Presiona FIN para salir")
+        print("Reacciona!")
+
+        inicio = time.ticks_ms()
+        tiempos = {'J1': None, 'J2': None}
+        penal = {'J1': None, 'J2': None}
+
+        while True:
+            if antirrebote(btn_fin):
+                print("Cancelado por usuario.")
                 apagar_salidas()
-                break
-        if ganador is not None:
-            break
+                return
 
-        for i, btn in enumerate(botones_j2):
-            if antirrebote(btn):
-                fin = time.ticks_ms()
-                tiempo = time.ticks_diff(fin, inicio)
-                ganador = 'J2' if i == estimulo else 'Nadie (J2 erró)'
-                apagar_salidas()
-                break
-        if ganador is not None:
-            break
+            if modo_actual == "1jugador":
+                if time.ticks_diff(time.ticks_ms(), inicio) >= 2000:
+                    break
 
-    if ganador.startswith('J'):
-        print(f"{ganador} gana la Muerte Súbita en {tiempo} ms")
-    else:
-        print(f" {ganador}. No hubo ganador válido.")
+                for i, btn in enumerate(botones_j1):
+                    if tiempos['J1'] is None and antirrebote(btn):
+                        fin = time.ticks_ms()
+                        tiempos['J1'] = time.ticks_diff(fin, inicio)
+                        penal['J1'] = 0 if i == estimulo else -1
+                        break
+                if tiempos['J1'] is not None:
+                    break
 
+            else:
+                for i, btn in enumerate(botones_j1):
+                    if tiempos['J1'] is None and antirrebote(btn):
+                        fin = time.ticks_ms()
+                        tiempos['J1'] = time.ticks_diff(fin, inicio)
+                        penal['J1'] = 0 if i == estimulo else -1
 
-# MENÚ PRINCIPAL
+                for i, btn in enumerate(botones_j2):
+                    if tiempos['J2'] is None and antirrebote(btn):
+                        fin = time.ticks_ms()
+                        tiempos['J2'] = time.ticks_diff(fin, inicio)
+                        penal['J2'] = 0 if i == estimulo else -1
 
+                if (tiempos['J1'] is not None and tiempos['J2'] is not None) or \
+                   time.ticks_diff(time.ticks_ms(), inicio) > 3000:
+                    break
+
+        apagar_salidas()
+
+        t1 = f"{tiempos['J1']} ms" if tiempos['J1'] is not None else "—"
+        t2 = f"{tiempos['J2']} ms" if tiempos['J2'] is not None else "—"
+        print(f"Jugador 1: {t1}")
+        if modo_actual == "2jugadores":
+            print(f"Jugador 2: {t2}")
+
+        if modo_actual == "1jugador":
+            if penal['J1'] == 0:
+                print("Jugador 1 gana esta ronda de Muerte Súbita!")
+            elif penal['J1'] == -1:
+                print("Jugador 1 falló. Pierde la ronda.")
+            else:
+                print("Tiempo agotado. Nadie gana.")
+        else:
+            if penal['J1'] == 0 and penal['J2'] == 0:
+                if tiempos['J1'] < tiempos['J2']:
+                    print("Jugador 1 gana esta ronda de Muerte Súbita!")
+                elif tiempos['J2'] < tiempos['J1']:
+                    print("Jugador 2 gana esta ronda de Muerte Súbita!")
+                else:
+                    print("Empate perfecto, ambos ganan la ronda!")
+            elif penal['J1'] == 0:
+                print("Jugador 1 gana esta ronda (único correcto)!")
+            elif penal['J2'] == 0:
+                print("Jugador 2 gana esta ronda (único correcto)!")
+            elif penal['J1'] == -1:
+                print("Jugador 1 falló.")
+            elif penal['J2'] == -1:
+                print("Jugador 2 falló.")
+            else:
+                print("Tiempo agotado. Nadie gana.")
+
+        print("Preparando la siguiente ronda...\n")
+        time.sleep(2)
+
+# =========================
+# PROGRAMA PRINCIPAL
+# =========================
 def main():
     print("=== Juego de Reflejos (ESP32) ===")
-    print("• LEDs por REGISTROS (GPIO W1TS/W1TC)")
+    print("• LEDs por REGISTROS")
     print("• Modo 3 por interrupción en GPIO", IRQ_MODO3_PIN)
     while True:
         print("\n===== MENÚ PRINCIPAL =====")
         print("1. Juego de 1 jugador")
         print("2. Juego de 2 jugadores")
-        print("3. (El juego especial se activa con el botón de interrupción en cualquier momento si quiere)")
-        opcion = input("Selecciona una opción: ")
+        print("3. (Modo especial con botón de interrupcion)")
+        opcion = input("Selecciona una opcion: ")
 
         if opcion == "1":
             juego_1jugador()
         elif opcion == "2":
             juego_2jugadores()
         elif opcion == "3":
-            print("El modo 3 se activa PRESIONANDO el botón en GPIO", IRQ_MODO3_PIN)
+            print("El modo 3 se activa PRESIONANDO el boton de interrupción", IRQ_MODO3_PIN)
         else:
-           
-# Estado inicial seguro para que todo este apagado al inicio
+            print("Opción invalida")
 
 apagar_salidas()
 leds_all_off()
-
-
 main()
+
