@@ -2,7 +2,7 @@ from machine import Pin
 import time, random
 import micropython
 
-# CONFIGURACIÓN DE PINES
+#CONFIGURACIÓN DE PINES
 
 LED_PINS = (2, 4, 5)            # pines para los Leds
 BUZZER_PIN = 18                 # Pin buzzer
@@ -44,7 +44,7 @@ btn_inicio = Pin(BTN_INICIO_PIN, Pin.IN, Pin.PULL_DOWN)
 btn_fin = Pin(BTN_FIN_PIN, Pin.IN, Pin.PULL_DOWN)
 
 # Interrupción modo 3
-irq_pin = Pin(IRQ_MODO3_PIN, Pin.IN,Pin.PULL_DOWN)
+irq_pin = Pin(IRQ_MODO3_PIN, Pin.IN)
 
 
 # VARIABLES para los estados
@@ -347,6 +347,7 @@ def main():
         else:
            
 # Estado inicial seguro para que todo este apagado al inicio
+
 apagar_salidas()
 leds_all_off()
 
